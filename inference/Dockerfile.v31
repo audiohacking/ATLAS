@@ -1,20 +1,26 @@
-# GGML_BACKEND selects the inference back-end at build time:
+# GGML_BACKEND selects the GPU/compute back-end for Linux container builds:
 #   cuda  (default) — NVIDIA CUDA via nvidia/cuda base image
 #   rocm             — AMD ROCm/HIP via rocm/dev-ubuntu base image
-#   metal            — Apple Metal (requires macOS Docker host)
 #   cpu              — CPU-only fallback, no GPU required
 #
-# CUDA_ARCHITECTURES is only used when GGML_BACKEND=cuda.
-# Override as needed, e.g.:
-#   docker build --build-arg GGML_BACKEND=rocm ...
-#   docker build --build-arg GGML_BACKEND=metal ...
+# Apple Metal is NOT supported here. Metal requires native macOS toolchain
+# (Xcode + Metal framework) that is unavailable inside any Linux container.
+# Use the GitHub Actions workflow (.github/workflows/build-inference.yml),
+# which runs on macos-latest, to produce Metal binaries.
+#
+# CUDA_ARCHITECTURES targets:
+#   89-real  — Ada Lovelace (RTX 4000 series, L40)
+#   90-real  — Hopper       (H100, H200)
+#   120-real — Blackwell    (GB200, RTX 5000 series)
+# Narrow to your GPU to reduce compile time, e.g.:
+#   docker build --build-arg GGML_BACKEND=rocm .
+#   docker build --build-arg CUDA_ARCHITECTURES=89-real .
 ARG GGML_BACKEND=cuda
 ARG CUDA_ARCHITECTURES=89-real;90-real;120-real
 
 # === Build-stage base images (only the selected one is resolved) ===
 FROM docker.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 AS base-cuda
 FROM docker.io/rocm/dev-ubuntu-24.04:6.3-complete    AS base-rocm
-FROM ubuntu:24.04                                     AS base-metal
 FROM ubuntu:24.04                                     AS base-cpu
 
 # === Builder ===
@@ -31,10 +37,9 @@ RUN git clone https://github.com/ggml-org/llama.cpp /llama.cpp \
     && mkdir -p /llama.cpp/tmp \
     && cd /llama.cpp \
     && case "$GGML_BACKEND" in \
-         cuda)  CMAKE_EXTRA="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" ;; \
-         rocm)  CMAKE_EXTRA="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906;gfx908;gfx90a;gfx1030;gfx1100" ;; \
-         metal) CMAKE_EXTRA="-DGGML_METAL=ON" ;; \
-         *)     CMAKE_EXTRA="" ;; \
+         cuda) CMAKE_EXTRA="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" ;; \
+         rocm) CMAKE_EXTRA="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906;gfx908;gfx90a;gfx1030;gfx1100" ;; \
+         *)    CMAKE_EXTRA="" ;; \
        esac \
     && cmake -B build -DBUILD_SHARED_LIBS=OFF ${CMAKE_EXTRA} \
     && cmake --build build --config Release -j$(nproc)
@@ -42,7 +47,6 @@ RUN git clone https://github.com/ggml-org/llama.cpp /llama.cpp \
 # === Runtime base images ===
 FROM docker.io/nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime-cuda
 FROM docker.io/rocm/dev-ubuntu-24.04:6.3-complete     AS runtime-rocm
-FROM ubuntu:24.04                                      AS runtime-metal
 FROM ubuntu:24.04                                      AS runtime-cpu
 
 FROM runtime-${GGML_BACKEND} AS final

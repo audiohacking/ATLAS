@@ -1,0 +1,24 @@
+# AMD ROCm override for docker-compose.yml
+#
+# Usage:
+#   GGML_BACKEND=rocm docker compose -f docker-compose.yml -f docker-compose.rocm.yml up --build
+#
+# This override:
+#   - Sets GGML_BACKEND=rocm for the llama-server build
+#   - Replaces the NVIDIA deploy block with ROCm device mappings
+#   - Mounts /dev/kfd (ROCm kernel driver) and /dev/dri (GPU render nodes)
+
+services:
+  llama-server:
+    build:
+      args:
+        GGML_BACKEND: rocm
+    deploy: !reset {}       # remove the nvidia deploy block
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}

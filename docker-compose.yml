@@ -1,10 +1,14 @@
 services:
   # --- LLM Inference ---
-  # Build backend is selected with GGML_BACKEND (cuda|rocm|metal|cpu).
+  # Build backend is selected with GGML_BACKEND (cuda|rocm|cpu).
+  # Pre-built Metal binaries for macOS are produced by the GitHub Actions
+  # workflow (.github/workflows/build-inference.yml) on macos-latest and
+  # are not used with docker compose — run llama-server directly on macOS.
+  #
   # GPU access uses the Docker Compose `deploy.resources` spec:
-  #   - NVIDIA: works automatically with the nvidia container runtime installed.
-  #   - AMD/ROCm: add a compose override that maps /dev/kfd and /dev/dri.
-  #   - Apple Metal / CPU: remove the `deploy` block entirely.
+  #   - NVIDIA (default): works with the nvidia container runtime installed.
+  #   - AMD/ROCm: use docker-compose.rocm.yml override (maps /dev/kfd, /dev/dri).
+  #   - CPU-only: remove the `deploy` block (or override with GGML_BACKEND=cpu).
   llama-server:
     build:
       context: ./inference

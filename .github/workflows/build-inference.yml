@@ -1,0 +1,201 @@
+# Build llama-server for every supported GGML backend.
+#
+# Backend matrix:
+#   cuda  — NVIDIA CUDA, built inside Docker on ubuntu-latest, pushed to GHCR
+#   rocm  — AMD ROCm/HIP, built inside Docker on ubuntu-latest, pushed to GHCR
+#   cpu   — CPU-only, built inside Docker on ubuntu-latest, pushed to GHCR
+#   metal — Apple Metal, built natively on macos-latest (Metal GPU frameworks
+#            are unavailable inside Linux containers); binaries uploaded as
+#            workflow artifacts and attached to GitHub Releases.
+#
+# Images are tagged:
+#   ghcr.io/<owner>/atlas/llama-server:<branch>-<backend>
+#   ghcr.io/<owner>/atlas/llama-server:sha-<sha>-<backend>
+#   ghcr.io/<owner>/atlas/llama-server:<semver>-<backend>   (on release)
+#
+# Trigger conditions:
+#   • push to main that touches inference/ or this file
+#   • any pull request that touches inference/ or this file (build only, no push)
+#   • GitHub Release published (build + push + attach Metal zip to release)
+#   • workflow_dispatch for ad-hoc builds
+
+name: Build Inference Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "inference/**"
+      - ".github/workflows/build-inference.yml"
+  pull_request:
+    paths:
+      - "inference/**"
+      - ".github/workflows/build-inference.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: "Push images to GHCR (linux backends)"
+        type: boolean
+        default: false
+      cuda_architectures:
+        description: "CUDA architectures (semicolon-separated, e.g. 89-real;90-real;120-real)"
+        type: string
+        default: "89-real;90-real;120-real"
+
+env:
+  REGISTRY: ghcr.io
+  # Image namespace: ghcr.io/<owner>/atlas/llama-server
+  IMAGE_NAME: ${{ github.repository_owner }}/atlas/llama-server
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Linux builds: CUDA / ROCm / CPU
+  # The Dockerfiles contain all compiler toolchains (nvcc, hipcc) so no GPU
+  # hardware is required on the runner itself — compilation happens inside
+  # the container image layers.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: "${{ matrix.backend }} (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cuda
+            # CUDA arch targets:
+            #   89-real = Ada Lovelace (RTX 4000, L40)
+            #   90-real = Hopper (H100, H200)
+            #   120-real = Blackwell (GB200, RTX 5000 series)
+            # Override via workflow_dispatch input to target a single GPU.
+            cuda_architectures: "89-real;90-real;120-real"
+          - backend: rocm
+            cuda_architectures: ""
+          - backend: cpu
+            cuda_architectures: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Skip on PRs to avoid credential exposure for untrusted forks
+        if: >
+          github.event_name != 'pull_request' &&
+          (github.event_name != 'workflow_dispatch' || inputs.push_images)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve CUDA architectures
+        id: cuda_arch
+        run: |
+          # workflow_dispatch input overrides matrix default
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ -n "${{ inputs.cuda_architectures }}" ]; then
+            echo "value=${{ inputs.cuda_architectures }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ matrix.cuda_architectures }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,suffix=-${{ matrix.backend }}
+            type=ref,event=pr,suffix=-${{ matrix.backend }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.backend }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.backend }}
+            type=sha,prefix=sha-,suffix=-${{ matrix.backend }}
+
+      - name: Build (and push) Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./inference
+          file: ./inference/Dockerfile.v31
+          build-args: |
+            GGML_BACKEND=${{ matrix.backend }}
+            CUDA_ARCHITECTURES=${{ steps.cuda_arch.outputs.value }}
+          push: >-
+            ${{
+              github.event_name == 'push' ||
+              github.event_name == 'release' ||
+              (github.event_name == 'workflow_dispatch' && inputs.push_images)
+            }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache scoped per backend so cuda/rocm/cpu don't share
+          cache-from: type=gha,scope=inference-${{ matrix.backend }}
+          cache-to: type=gha,scope=inference-${{ matrix.backend }},mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Metal build: native macOS
+  #
+  # Metal GPU frameworks (Metal.framework, MetalPerformanceShaders, etc.) are
+  # macOS-only and cannot be accessed from inside a Linux Docker container.
+  # The binary produced here runs directly on the host — no container needed.
+  #
+  # Outputs:
+  #   • workflow artifact: llama-server-metal-macos-arm64
+  #   • on release: zip attached to the GitHub Release
+  # ─────────────────────────────────────────────────────────────────────────
+  build-metal:
+    name: "metal (macos-latest)"
+    runs-on: macos-latest
+    permissions:
+      contents: write  # needed to upload release assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install cmake
+
+      - name: Clone llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp /tmp/llama.cpp
+
+      - name: Build with GGML_METAL=ON
+        run: |
+          cd /tmp/llama.cpp
+          cmake -B build \
+            -DGGML_METAL=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j$(sysctl -n hw.logicalcpu)
+
+      - name: Smoke-test binary
+        run: /tmp/llama.cpp/build/bin/llama-server --version
+
+      - name: Upload binaries as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-server-metal-macos-arm64
+          path: |
+            /tmp/llama.cpp/build/bin/llama-server
+            /tmp/llama.cpp/build/bin/llama-cli
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach binaries to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd /tmp/llama.cpp/build/bin
+          zip -j llama-server-metal-macos-arm64.zip llama-server llama-cli
+          gh release upload "${{ github.ref_name }}" \
+            llama-server-metal-macos-arm64.zip \
+            --repo "${{ github.repository }}"
