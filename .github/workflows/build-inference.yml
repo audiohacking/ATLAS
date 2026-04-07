@@ -75,8 +75,6 @@ jobs:
             cuda_architectures: "89-real;90-real;120-real"
           - backend: rocm
             cuda_architectures: ""
-          - backend: cpu
-            cuda_architectures: ""
 
     steps:
       - name: Checkout
