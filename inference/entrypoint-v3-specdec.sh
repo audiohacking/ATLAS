@@ -25,9 +25,12 @@ TEMPLATE="${CHAT_TEMPLATE:-Qwen3-custom.jinja}"
 PARALLEL="${PARALLEL_SLOTS:-2}"
 DRAFT_MODEL="${DRAFT_MODEL:-/models/Qwen3-0.6B-Q8_0.gguf}"
 
-export GGML_CUDA_NO_PINNED="${GGML_CUDA_NO_PINNED:-0}"
-export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
-export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-LAZY}"
+# CUDA performance tuning — ignored on non-CUDA backends
+if command -v nvidia-smi >/dev/null 2>&1; then
+    export GGML_CUDA_NO_PINNED="${GGML_CUDA_NO_PINNED:-0}"
+    export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+    export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-LAZY}"
+fi
 
 echo "=== V3: Generation + Self-Embeddings + Speculative Decoding ==="
 echo "  Context: $CTX_LENGTH (draft: $DRAFT_CTX) | KV: $KV_CACHE_TYPE | Parallel: $PARALLEL"

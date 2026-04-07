@@ -1,17 +1,24 @@
 services:
-  # --- LLM Inference (CUDA + grammar support) ---
+  # --- LLM Inference ---
+  # Build backend is selected with GGML_BACKEND (cuda|rocm|metal|cpu).
+  # GPU access uses the Docker Compose `deploy.resources` spec:
+  #   - NVIDIA: works automatically with the nvidia container runtime installed.
+  #   - AMD/ROCm: add a compose override that maps /dev/kfd and /dev/dri.
+  #   - Apple Metal / CPU: remove the `deploy` block entirely.
   llama-server:
     build:
       context: ./inference
       dockerfile: Dockerfile.v31
-    # GPU access: works with Docker (nvidia runtime) and Podman (--device)
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      args:
+        GGML_BACKEND: ${GGML_BACKEND:-cuda}
+        CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-89-real;90-real;120-real}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - ${ATLAS_MODELS_DIR:-./models}:/models:ro
     command: >
