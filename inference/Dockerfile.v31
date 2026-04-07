@@ -1,21 +1,57 @@
-FROM docker.io/nvidia/cuda:12.8.0-devel-rockylinux9 AS builder
-RUN dnf install -y git cmake gcc-c++ && dnf clean all
-# Use /llama.cpp/tmp for build temp to avoid /tmp space exhaustion
-ENV TMPDIR=/llama.cpp/tmp
-RUN git clone https://github.com/ggml-org/llama.cpp /llama.cpp && \
-    cd /llama.cpp && \
-    mkdir -p /llama.cpp/tmp && \
-    # ATLAS patch: prevent --embeddings from poisoning the draft model context.
-    # Kept for compatibility — harmless when no draft model is used (Qwen3.5).
-    # If the patch target line doesn't exist in newer versions, the sed is a no-op.
-    sed -i '/auto params_dft = params_base;/a\        params_dft.embedding = false;  // ATLAS: draft never needs embeddings' \
-        tools/server/server-context.cpp 2>/dev/null || true && \
-    cmake -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_CUDA_ARCHITECTURES=120 && \
-    cmake --build build --config Release -j5
+# GGML_BACKEND selects the GPU/compute back-end for Linux container builds:
+#   cuda  (default) — NVIDIA CUDA via nvidia/cuda base image
+#   rocm             — AMD ROCm/HIP via rocm/dev-ubuntu base image
+#   cpu              — CPU-only fallback, no GPU required
+#
+# Apple Metal is NOT supported here. Metal requires native macOS toolchain
+# (Xcode + Metal framework) that is unavailable inside any Linux container.
+# Use the GitHub Actions workflow (.github/workflows/build-inference.yml),
+# which runs on macos-latest, to produce Metal binaries.
+#
+# CUDA_ARCHITECTURES targets:
+#   89-real  — Ada Lovelace (RTX 4000 series, L40)
+#   90-real  — Hopper       (H100, H200)
+#   120-real — Blackwell    (GB200, RTX 5000 series)
+# Narrow to your GPU to reduce compile time, e.g.:
+#   docker build --build-arg GGML_BACKEND=rocm .
+#   docker build --build-arg CUDA_ARCHITECTURES=89-real .
+ARG GGML_BACKEND=cuda
+ARG CUDA_ARCHITECTURES=89-real;90-real;120-real
 
-FROM docker.io/nvidia/cuda:12.8.0-runtime-rockylinux9
+# === Build-stage base images (only the selected one is resolved) ===
+FROM docker.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 AS base-cuda
+FROM docker.io/rocm/dev-ubuntu-24.04:6.3-complete    AS base-rocm
+FROM ubuntu:24.04                                     AS base-cpu
+
+# === Builder ===
+FROM base-${GGML_BACKEND} AS builder
+ARG GGML_BACKEND=cuda
+ARG CUDA_ARCHITECTURES=89-real;90-real;120-real
+
+ENV DEBIAN_FRONTEND=noninteractive TMPDIR=/llama.cpp/tmp
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake gcc g++ make \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/ggml-org/llama.cpp /llama.cpp \
+    && mkdir -p /llama.cpp/tmp \
+    && cd /llama.cpp \
+    && case "$GGML_BACKEND" in \
+         cuda) CMAKE_EXTRA="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" ;; \
+         rocm) CMAKE_EXTRA="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx906;gfx908;gfx90a;gfx1030;gfx1100" ;; \
+         *)    CMAKE_EXTRA="" ;; \
+       esac \
+    && cmake -B build -DBUILD_SHARED_LIBS=OFF ${CMAKE_EXTRA} \
+    && cmake --build build --config Release -j$(nproc)
+
+# === Runtime base images ===
+FROM docker.io/nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime-cuda
+FROM docker.io/rocm/dev-ubuntu-24.04:6.3-complete     AS runtime-rocm
+FROM ubuntu:24.04                                      AS runtime-cpu
+
+FROM runtime-${GGML_BACKEND} AS final
 COPY --from=builder /llama.cpp/build/bin/llama-server /usr/local/bin/
-COPY --from=builder /llama.cpp/build/bin/llama-cli /usr/local/bin/
+COPY --from=builder /llama.cpp/build/bin/llama-cli    /usr/local/bin/
 RUN mkdir -p /models /templates
 COPY templates/ /templates/
 COPY entrypoint-v3.1-9b.sh /entrypoint.sh

@@ -39,9 +39,97 @@ def run_command(cmd: str, default: str = "") -> str:
         return default
 
 
+def _get_nvidia_gpu_info(info: Dict[str, Any]) -> bool:
+    """
+    Populate *info* from nvidia-smi.  Returns True if NVIDIA GPU was found.
+    """
+    if not run_command("which nvidia-smi"):
+        return False
+
+    name = run_command("nvidia-smi --query-gpu=name --format=csv,noheader,nounits")
+    if name:
+        info["model"] = name.split('\n')[0].strip()
+
+    vram = run_command("nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits")
+    if vram:
+        try:
+            info["vram_gb"] = float(vram.split('\n')[0].strip()) / 1024
+        except ValueError:
+            pass
+
+    driver = run_command("nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits")
+    if driver:
+        info["driver_version"] = driver.split('\n')[0].strip()
+
+    power = run_command("nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits")
+    if power:
+        try:
+            info["power_draw_watts"] = float(power.split('\n')[0].strip())
+        except ValueError:
+            pass
+
+    return bool(info["model"])
+
+
+def _get_rocm_gpu_info(info: Dict[str, Any]) -> bool:
+    """
+    Populate *info* from rocm-smi (AMD ROCm).  Returns True if AMD GPU was found.
+    """
+    if not run_command("which rocm-smi"):
+        return False
+
+    # rocm-smi --showproductname prints lines like "GPU[0] : Product Name: Radeon RX 7900 XTX"
+    name = run_command("rocm-smi --showproductname --noheader 2>/dev/null | awk -F': ' '/Product Name/{print $NF; exit}'")
+    if name:
+        info["model"] = name.strip()
+
+    # VRAM in bytes → GB
+    vram = run_command("rocm-smi --showmeminfo vram --noheader 2>/dev/null | awk '/Total Memory/{print $NF; exit}'")
+    if vram:
+        try:
+            info["vram_gb"] = float(vram.strip()) / (1024 ** 3)
+        except ValueError:
+            pass
+
+    driver = run_command("rocm-smi --showdriverversion --noheader 2>/dev/null | awk '{print $NF; exit}'")
+    if driver:
+        info["driver_version"] = driver.strip()
+
+    return bool(info["model"])
+
+
+def _get_metal_gpu_info(info: Dict[str, Any]) -> bool:
+    """
+    Populate *info* from system_profiler (Apple Metal / macOS).
+    Returns True if a Metal GPU was found.
+    """
+    if platform.system() != "Darwin":
+        return False
+
+    sp_out = run_command("system_profiler SPDisplaysDataType 2>/dev/null")
+    if not sp_out:
+        return False
+
+    match = re.search(r'Chipset Model:\s*(.+)', sp_out)
+    if match:
+        info["model"] = match.group(1).strip()
+
+    match = re.search(r'VRAM \([^)]+\):\s*([\d.]+)\s*(MB|GB)', sp_out, re.IGNORECASE)
+    if match:
+        try:
+            vram_val = float(match.group(1))
+            if match.group(2).upper() == "MB":
+                vram_val /= 1024
+            info["vram_gb"] = vram_val
+        except ValueError:
+            pass
+
+    return bool(info["model"])
+
+
 def get_gpu_info() -> Dict[str, Any]:
     """
-    Get GPU information using nvidia-smi.
+    Get GPU information, trying NVIDIA, AMD ROCm, and Apple Metal in order.
 
     Returns:
         Dictionary with GPU model, VRAM, driver version, and power draw
@@ -53,58 +141,37 @@ def get_gpu_info() -> Dict[str, Any]:
         "power_draw_watts": 0.0
     }
 
-    # Try nvidia-smi
-    nvidia_smi = run_command("which nvidia-smi")
-    if not nvidia_smi:
-        return info
-
-    # Get GPU name
-    name = run_command("nvidia-smi --query-gpu=name --format=csv,noheader,nounits")
-    if name:
-        info["model"] = name.split('\n')[0].strip()
-
-    # Get VRAM
-    vram = run_command("nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits")
-    if vram:
-        try:
-            # Convert MiB to GB
-            info["vram_gb"] = float(vram.split('\n')[0].strip()) / 1024
-        except ValueError:
-            pass
-
-    # Get driver version
-    driver = run_command("nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits")
-    if driver:
-        info["driver_version"] = driver.split('\n')[0].strip()
-
-    # Get current power draw
-    power = run_command("nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits")
-    if power:
-        try:
-            info["power_draw_watts"] = float(power.split('\n')[0].strip())
-        except ValueError:
-            pass
-
+    _get_nvidia_gpu_info(info) or _get_rocm_gpu_info(info) or _get_metal_gpu_info(info)
     return info
 
 
 def get_cuda_version() -> str:
     """
-    Get CUDA version.
+    Get the GPU accelerator version (CUDA, ROCm, or Metal).
 
     Returns:
-        CUDA version string
+        Version string for the active GPU accelerator, or empty string.
     """
-    # Try nvcc first
+    # CUDA — try nvcc then nvidia-smi
     nvcc_version = run_command("nvcc --version | grep release | sed 's/.*release //' | sed 's/,.*//'")
     if nvcc_version:
         return nvcc_version
 
-    # Try nvidia-smi
     nvidia_smi_output = run_command("nvidia-smi")
     match = re.search(r'CUDA Version:\s*(\d+\.\d+)', nvidia_smi_output)
     if match:
         return match.group(1)
+
+    # ROCm — hipconfig
+    rocm_version = run_command("hipconfig --version 2>/dev/null | head -1")
+    if rocm_version:
+        return rocm_version
+
+    # Metal — macOS build version (Metal is always present on modern macOS)
+    if platform.system() == "Darwin":
+        macos_ver = run_command("sw_vers -productVersion 2>/dev/null")
+        if macos_ver:
+            return f"Metal (macOS {macos_ver.strip()})"
 
     return ""
 

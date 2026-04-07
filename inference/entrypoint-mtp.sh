@@ -14,9 +14,12 @@ KV_FLAGS="-ctk $KV_CACHE_K -ctv $KV_CACHE_V"
 PARALLEL="${PARALLEL_SLOTS:-4}"
 MODEL_FILE="${MODEL_PATH:-/models/Qwen3.5-9B-MTP-Q4_K_M-F16mtp.gguf}"
 
-export GGML_CUDA_NO_PINNED="${GGML_CUDA_NO_PINNED:-0}"
-export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
-export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-LAZY}"
+# CUDA performance tuning — ignored on non-CUDA backends
+if command -v nvidia-smi >/dev/null 2>&1; then
+    export GGML_CUDA_NO_PINNED="${GGML_CUDA_NO_PINNED:-0}"
+    export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+    export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-LAZY}"
+fi
 
 echo "=== V3.1 MTP: Qwen3.5-9B — Generation + MTP + Self-Embeddings ==="
 echo "  Model: $MODEL_FILE"
